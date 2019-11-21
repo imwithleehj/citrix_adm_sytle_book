@@ -1,0 +1,145 @@
+name: os-cs-lb-mon
+namespace: com.citrix.adc.stylebooks
+version: "1.0"
+display-name: "Openstack HTTP/SSL Content Switched Load Balanced Application with Monitor"
+description: "This StyleBook defines a typical HTTP or SSL Content Switched Application configuration with monitor."
+schema-version: "1.0"
+import-stylebooks:
+  -
+    namespace: netscaler.nitro.config
+    prefix: ns
+    version: "10.5"
+  -
+    namespace: com.citrix.adc.stylebooks
+    prefix: stlb
+    version: "1.0"
+  -
+    namespace: com.citrix.adc.commontypes
+    prefix: cmtypes
+    version: "1.0"
+substitutions:
+  connection-limit-part-1 : str("SYS.vserver")
+  connection-limit-part-2 : str(".connections.gt")
+  dummy : str("")
+  emptyspace[]:
+    true: str("%{$substitutions.dummy}% %{$substitutions.dummy}%")
+  secure[]:
+    "HTTPS": "YES"
+  monitor-type[]:
+    "HTTP": "HTTP"
+    "HTTPS": "HTTP"
+    "TCP": "TCP"
+    "PING": "PING"
+  get_lb_algorithm[]:
+    ROUND_ROBIN: ROUNDROBIN
+    LEAST_CONNECTIONS: LEASTCONNECTION
+    SOURCE_IP: SOURCEIPHASH
+  get_session_persistence[]:
+    SOURCE_IP: SOURCEIP
+  get_service_type[]:
+    "HTTP": "HTTP"
+    "TCP": "TCP"
+    "TERMINATED_HTTPS": "SSL"
+    "SOURCE_IP": "SOURCEIP"
+  description(description): truncate($description, 256)
+parameters:
+  - name: loadbalancer_id
+    label: "Openstack loadbalancer Id"
+    description: "Id of the loadbalanced application"
+    type: string
+    key: true
+    required: true
+  -
+    name: loadbalancer
+    label: "Openstack Loadbalancer"
+    description: "List of monitor to monitor Application Servers."
+    type: "cmtypes::os-loadbalancer-params"
+    required: true
+  -
+    name: listener
+    label: "Openstack listeners"
+    description: "Details of listeners for the loadbalancer."
+    type: "cmtypes::os-listener-params[]"
+  -
+    name: pool
+    label: "OpenStack LB pools"
+    description: "Details of the OpenStack LB Pools."
+    type: "cmtypes::os-pool-params[]"
+  -
+    name: member
+    label: "OpenStack Pool Members"
+    description: "Details of Pool Members."
+    type: "cmtypes::os-member-params[]"
+  -
+    name: healthmonitor
+    label: "OpenStack LB Health Monitors"
+    description: "Details of OpenStack LB Health Monitors."
+    type: "cmtypes::os-monitor-params[]"
+
+components:
+
+  -
+    name: help-comp
+    description: "For every pool create properties for associated member and monitor object."
+    condition: $parameters.pool
+    type: string
+    repeat: $parameters.pool
+    repeat-item: pool
+    properties:
+        dummy: "abc"
+    components:
+      -
+        name: help-comp-member
+        description: "Prepares member properties."
+        condition: $parameters.member
+        type: cmtypes::server-ip-port-params
+        repeat: $parameters.member
+        repeat-item: member
+        repeat-condition: $pool.id == $member.pool_id and $member.admin_state_up == true
+        properties:
+            ip: $member.address
+            port: $member.protocol_port
+            weight?: $member.weight
+      -
+        name: help-comp-monitor
+        description: "Prepares healthmonitor properties."
+        type: cmtypes::os-monitor
+        condition: $parameters.healthmonitor
+        repeat: $parameters.healthmonitor
+        repeat-item: monitor
+        repeat-condition: $pool.id == $monitor.pool_id 
+        properties:
+            monitorname: $monitor.id
+            type: $substitutions.monitor-type($monitor.type)
+            interval?: $monitor.delay 
+            resptimeout?: $monitor.timeout
+            retries?: $monitor.max_retries
+            respcodes?: $monitor.expected_codes
+            httprequest?: $monitor.http_method + $substitutions.emptyspace(exists($monitor.http_method) and exists($monitor.url_path)) + $monitor.url_path
+            secure?: $substitutions.secure($monitor.type)
+            destip?: $parameters.loadbalancer.vip_address
+
+  -
+    name: default-lb-mon-comp
+    description: "Creation of LB vserver and service groups when protocol and monitor and member are present."
+    type: stlb::os-lb-mon
+    condition: $parameters.pool
+    repeat:
+        repeat-list: $parameters.pool
+        repeat-item: pool
+        repeat-condition: $pool.listener_id
+        repeat:
+          repeat-list: $parameters.listener
+          repeat-item: listener
+          repeat-condition: $listener.id == $pool.listener_id
+    properties:
+        lb-appname: $parameters.loadbalancer.id + '-' + $pool.id
+        lb-virtual-ip: $parameters.loadbalancer.vip_address
+        lb-virtual-port: $listener.protocol_port
+        lb-service-type: "ANY"
+        lb-advanced?:
+             algorithm?: $substitutions.get_lb_algorithm($pool.lb_algorithm)
+             persistence?: $substitutions.get_session_persistence($pool.session_persistence.type)
+        svc-service-type: "ANY"
+        svc-servers?: $components.help-comp[$repeat-index].components.help-comp-member.properties
+        monitors?: $components.help-comp[$repeat-index].components.help-comp-monitor.properties
